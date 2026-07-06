@@ -1,0 +1,226 @@
+// Diagnostic Center Management System — Prisma schema
+// PostgreSQL. All money stored as Decimal(12,2). Prices snapshotted on invoice items.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  ADMIN
+  RECEPTION
+  LAB
+}
+
+enum Gender {
+  MALE
+  FEMALE
+  OTHER
+}
+
+enum AgeUnit {
+  YEAR
+  MONTH
+  DAY
+}
+
+enum PaymentMethod {
+  CASH
+}
+
+enum LabResultStatus {
+  DRAFT
+  APPROVED
+}
+
+// Audit action codes — keep aligned with audit.service.ts
+// USER_LOGIN, USER_LOGOUT, USER_CREATED, USER_UPDATED, PASSWORD_CHANGED
+// PATIENT_CREATED, PATIENT_UPDATED
+// TEST_CREATED, TEST_UPDATED, TEST_DELETED
+// INVOICE_CREATED, PAYMENT_RECEIVED
+// REPORT_DRAFT_SAVED, REPORT_APPROVED
+// EXPENSE_CREATED, INCOME_CREATED, SETTING_UPDATED
+
+model User {
+  id           String   @id @default(cuid())
+  username     String   @unique
+  passwordHash String
+  name         String
+  role         Role
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  visitsCreated   Visit[]      @relation("VisitCreator")
+  invoicesCreated Invoice[]    @relation("InvoiceCreator")
+  resultsEntered  LabResult[]  @relation("ResultEnterer")
+  resultsApproved LabResult[]  @relation("ResultApprover")
+  expensesCreated Expense[]    @relation("ExpenseCreator")
+  incomeCreated   ManualIncome[] @relation("IncomeCreator")
+  auditLogs       AuditLog[]
+}
+
+model Patient {
+  id          String   @id @default(cuid())
+  // Human-friendly code, e.g. P-2026-00001
+  patientCode String   @unique
+  name        String
+  age         Int
+  ageUnit     AgeUnit  @default(YEAR)
+  gender      Gender
+  mobile      String
+  address     String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  visits Visit[]
+
+  @@index([name])
+  @@index([mobile])
+}
+
+model TestCategory {
+  id    String @id @default(cuid())
+  name  String @unique
+  tests Test[]
+}
+
+model Test {
+  id              String   @id @default(cuid())
+  code            String   @unique
+  name            String
+  categoryId      String
+  price           Decimal  @db.Decimal(12, 2)
+  // Reference ranges: [{ analyte, unit, maleRef, femaleRef, ... }]
+  // Stored as JSON because shape varies per test.
+  referenceRanges Json     @default("[]")
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  category     TestCategory @relation(fields: [categoryId], references: [id])
+  invoiceItems InvoiceItem[]
+
+  @@index([name])
+}
+
+model Visit {
+  id          String   @id @default(cuid())
+  patientId   String
+  createdById String
+  createdAt   DateTime @default(now())
+
+  patient   Patient   @relation(fields: [patientId], references: [id])
+  createdBy User      @relation("VisitCreator", fields: [createdById], references: [id])
+  invoices  Invoice[]
+
+  @@index([patientId])
+  @@index([createdAt])
+}
+
+model Invoice {
+  id            String        @id @default(cuid())
+  invoiceNo     String        @unique
+  visitId       String
+  subtotal      Decimal       @db.Decimal(12, 2)
+  discount      Decimal       @default(0) @db.Decimal(12, 2)
+  total         Decimal       @db.Decimal(12, 2)
+  paymentMethod PaymentMethod @default(CASH)
+  createdById   String
+  createdAt     DateTime      @default(now())
+
+  visit     Visit         @relation(fields: [visitId], references: [id])
+  createdBy User          @relation("InvoiceCreator", fields: [createdById], references: [id])
+  items     InvoiceItem[]
+
+  @@index([createdAt])
+}
+
+model InvoiceItem {
+  id             String  @id @default(cuid())
+  invoiceId      String
+  testId         String
+  // Snapshot of the test's price at billing time — invoices are immutable.
+  priceAtBilling Decimal @db.Decimal(12, 2)
+
+  invoice Invoice    @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  test    Test       @relation(fields: [testId], references: [id])
+  result  LabResult?
+
+  @@unique([invoiceId, testId])
+}
+
+model LabResult {
+  id            String          @id @default(cuid())
+  invoiceItemId String          @unique
+  // [{ analyte, value, unit, flag? }]
+  values        Json            @default("[]")
+  comments      String?
+  status        LabResultStatus @default(DRAFT)
+  enteredById   String
+  approvedById  String?
+  approvedAt    DateTime?
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+
+  invoiceItem InvoiceItem @relation(fields: [invoiceItemId], references: [id], onDelete: Cascade)
+  enteredBy   User        @relation("ResultEnterer", fields: [enteredById], references: [id])
+  approvedBy  User?       @relation("ResultApprover", fields: [approvedById], references: [id])
+
+  @@index([status])
+}
+
+model Expense {
+  id              String   @id @default(cuid())
+  date            DateTime @db.Date
+  category        String
+  amount          Decimal  @db.Decimal(12, 2)
+  description     String?
+  attachmentPath  String?
+  createdById     String
+  createdAt       DateTime @default(now())
+
+  createdBy User @relation("ExpenseCreator", fields: [createdById], references: [id])
+
+  @@index([date])
+  @@index([category])
+}
+
+model ManualIncome {
+  id          String   @id @default(cuid())
+  date        DateTime @db.Date
+  category    String
+  amount      Decimal  @db.Decimal(12, 2)
+  description String?
+  createdById String
+  createdAt   DateTime @default(now())
+
+  createdBy User @relation("IncomeCreator", fields: [createdById], references: [id])
+
+  @@index([date])
+  @@index([category])
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  userId    String?
+  action    String
+  entity    String?
+  entityId  String?
+  meta      Json?
+  createdAt DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([action])
+  @@index([createdAt])
+}
+
+model Setting {
+  key   String @id
+  value String
+}
